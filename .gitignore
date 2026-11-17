@@ -7,6 +7,5 @@ coverage/
 .env*
 !.env.example
 .aistudio/
-public/assets/aistudio/
 .vscode/
 .playwright-cli/
