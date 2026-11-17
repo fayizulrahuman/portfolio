@@ -1,0 +1,634 @@
+<!doctype html>
+<html>
+<body>
+<pre id="status">Initializing...</pre>
+<script>
+const W = 1280, H = 720;
+
+const poseA = [
+  [798, 453], // 0: lidTL
+  [930, 431], // 1: lidTR
+  [885, 558], // 2: lidBR
+  [747, 586], // 3: hingeBot
+  [653, 569], // 4: baseTipBot
+  [653, 563], // 5: baseTipTop
+  [734, 548], // 6: deckPeak
+  [757, 548], // 7: baseHingeTop
+];
+
+const poseB = [
+  [875, 237], // 0: lidTL
+  [1044, 239], // 1: lidTR
+  [946, 517], // 2: lidBR
+  [783, 555], // 3: hingeBot
+  [507, 543], // 4: baseTipBot
+  [507, 537], // 5: baseTipTop
+  [654, 515], // 6: deckPeak
+  [782, 513], // 7: baseHingeTop
+];
+
+const TRIS = [
+  [0, 1, 2],
+  [0, 2, 7],
+  [7, 2, 3],
+  [7, 3, 4],
+  [7, 4, 5],
+  [7, 5, 6],
+];
+
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+
+async function postPng(canvas, name) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  await fetch('/save/' + name, { method: 'POST', body: blob });
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function insidePoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1];
+    const xj = poly[j][0], yj = poly[j][1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-9) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function drawTexturedTriangle(ctx, img, s0, s1, s2, d0, d1, d2) {
+  const cx = (d0[0] + d1[0] + d2[0]) / 3;
+  const cy = (d0[1] + d1[1] + d2[1]) / 3;
+  const pad = (p) => {
+    const dx = p[0] - cx, dy = p[1] - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    return [p[0] + (dx / len) * 0.9, p[1] + (dy / len) * 0.9];
+  };
+  const p0 = pad(d0), p1 = pad(d1), p2 = pad(d2);
+
+  const u0 = s0[0], v0 = s0[1], u1 = s1[0], v1 = s1[1], u2 = s2[0], v2 = s2[1];
+  const x0 = d0[0], y0 = d0[1], x1 = d1[0], y1 = d1[1], x2 = d2[0], y2 = d2[1];
+
+  const denom = u0 * (v1 - v2) + u1 * (v2 - v0) + u2 * (v0 - v1);
+  if (Math.abs(denom) < 1e-6) return;
+
+  const a = (x0 * (v1 - v2) + x1 * (v2 - v0) + x2 * (v0 - v1)) / denom;
+  const c = (x0 * (u2 - u1) + x1 * (u0 - u2) + x2 * (u1 - u0)) / denom;
+  const e = (x0 * (u1 * v2 - u2 * v1) + x1 * (u2 * v0 - u0 * v2) + x2 * (u0 * v1 - u1 * v0)) / denom;
+
+  const b = (y0 * (v1 - v2) + y1 * (v2 - v0) + y2 * (v0 - v1)) / denom;
+  const d = (y0 * (u2 - u1) + y1 * (u0 - u2) + y2 * (u1 - u0)) / denom;
+  const f = (y0 * (u1 * v2 - u2 * v1) + y1 * (u2 * v0 - u0 * v2) + y2 * (u0 * v1 - u1 * v0)) / denom;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(p0[0], p0[1]);
+  ctx.lineTo(p1[0], p1[1]);
+  ctx.lineTo(p2[0], p2[1]);
+  ctx.closePath();
+  ctx.clip();
+  ctx.transform(a, b, c, d, e, f);
+  ctx.drawImage(img, 0, 0);
+  ctx.restore();
+}
+
+function smoothMaskRegion(data, mask, xMin, xMax, yMin, yMax, poly, passes) {
+  const tmp = new Uint8ClampedArray(data.length);
+  for (let pass = 0; pass < passes; pass++) {
+    tmp.set(data);
+    for (let y = yMin; y <= yMax; y++) {
+      for (let x = xMin; x <= xMax; x++) {
+        if (!mask[y * W + x] || !insidePoly(x, y, poly)) continue;
+        let r = 0, g = 0, b = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const yy = y + dy, xx = x + dx;
+            if (yy >= 0 && yy < H && xx >= 0 && xx < W && insidePoly(xx, yy, poly)) {
+              const idx = (yy * W + xx) * 4;
+              r += tmp[idx]; g += tmp[idx + 1]; b += tmp[idx + 2]; cnt++;
+            }
+          }
+        }
+        const oi = (y * W + x) * 4;
+        data[oi] = Math.round(r / cnt);
+        data[oi + 1] = Math.round(g / cnt);
+        data[oi + 2] = Math.round(b / cnt);
+      }
+    }
+  }
+}
+
+function buildCleanLaptopA(cutImg, removeLogo) {
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(cutImg, 349.3333, -165.3333, 592.8889, 1052.4444);
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const d = imgData.data;
+
+  const isSkin = new Uint8Array(W * H);
+  for (let y = 524; y <= 589; y++) {
+    for (let x = 768; x <= 900; x++) {
+      if (!insidePoly(x, y, poseA)) continue;
+      const i = (y * W + x) * 4;
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const warm = (r - b) > 10 || (r - g) > 6;
+      const crease = r < 92 && g < 92 && b < 95 && y > 540;
+      if (warm || crease) isSkin[y * W + x] = 1;
+    }
+  }
+
+  // Clean burgundy tie sliver along top-left keyboard deck bevel
+  for (let y = 544; y <= 566; y++) {
+    for (let x = 650; x <= 740; x++) {
+      if (!insidePoly(x, y, poseA)) continue;
+      const i = (y * W + x) * 4;
+      const r = d[i], g = d[i + 1];
+      if (r - g > 10 || r < 75) {
+        d[i] = 162; d[i + 1] = 164; d[i + 2] = 170; d[i + 3] = 255;
+      }
+    }
+  }
+
+  const isLogo = new Uint8Array(W * H);
+  if (removeLogo) {
+    for (let y = 478; y <= 527; y++) {
+      for (let x = 816; x <= 868; x++) {
+        const i = (y * W + x) * 4;
+        const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        if (lum < 105) isLogo[y * W + x] = 1;
+      }
+    }
+  }
+
+  const mask = new Uint8Array(W * H);
+  for (let y = 475; y <= 589; y++) {
+    for (let x = 762; x <= 905; x++) {
+      let hit = 0;
+      for (let dy = -3; dy <= 3 && !hit; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          const yy = y + dy, xx = x + dx;
+          if (yy >= 0 && yy < H && xx >= 0 && xx < W && (isSkin[yy * W + xx] || isLogo[yy * W + xx])) {
+            hit = 1; break;
+          }
+        }
+      }
+      mask[y * W + x] = hit;
+    }
+  }
+
+  const refCopy = new Uint8ClampedArray(d);
+  for (let y = 475; y <= 589; y++) {
+    for (let x = 762; x <= 905; x++) {
+      if (!mask[y * W + x] || !insidePoly(x, y, poseA)) continue;
+
+      let lx = x - 1;
+      while (lx >= 752 && (mask[y * W + lx] || !insidePoly(lx, y, poseA))) lx--;
+      let rx = x + 1;
+      while (rx <= 922 && (mask[y * W + rx] || !insidePoly(rx, y, poseA))) rx++;
+      const hasL = lx >= 752 && insidePoly(lx, y, poseA) && !mask[y * W + lx];
+      const hasR = rx <= 922 && insidePoly(rx, y, poseA) && !mask[y * W + rx];
+
+      let uy = y - 1, ux = x;
+      while (uy >= 445) {
+        const sx = Math.round(x + (y - uy) * -0.14);
+        if (insidePoly(sx, uy, poseA) && !mask[uy * W + sx] && !(sx >= 814 && sx <= 870 && uy >= 476 && uy <= 528)) {
+          ux = sx; break;
+        }
+        uy--;
+      }
+
+      let rSum = 0, gSum = 0, bSum = 0, wSum = 0;
+      if (hasL && hasR) {
+        const t = (x - lx) / (rx - lx);
+        const il = (y * W + lx) * 4, ir = (y * W + rx) * 4;
+        rSum += (refCopy[il] * (1 - t) + refCopy[ir] * t) * 1.25;
+        gSum += (refCopy[il + 1] * (1 - t) + refCopy[ir + 1] * t) * 1.25;
+        bSum += (refCopy[il + 2] * (1 - t) + refCopy[ir + 2] * t) * 1.25;
+        wSum += 1.25;
+      } else if (hasL) {
+        const il = (y * W + lx) * 4;
+        rSum += refCopy[il] * 0.65; gSum += refCopy[il + 1] * 0.65; bSum += refCopy[il + 2] * 0.65; wSum += 0.65;
+      } else if (hasR) {
+        const ir = (y * W + rx) * 4;
+        rSum += refCopy[ir] * 0.65; gSum += refCopy[ir + 1] * 0.65; bSum += refCopy[ir + 2] * 0.65; wSum += 0.65;
+      }
+
+      if (uy >= 445) {
+        const iu = (uy * W + ux) * 4;
+        const shade = Math.max(-14, -(y - uy) * 0.16);
+        rSum += (refCopy[iu] + shade) * 1.15;
+        gSum += (refCopy[iu + 1] + shade) * 1.15;
+        bSum += (refCopy[iu + 2] + shade) * 1.15;
+        wSum += 1.15;
+      }
+
+      const noise = (((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1) - 0.5) * 2.4;
+      const oi = (y * W + x) * 4;
+      d[oi] = clamp(Math.round(rSum / wSum + noise), 0, 255);
+      d[oi + 1] = clamp(Math.round(gSum / wSum + noise), 0, 255);
+      d[oi + 2] = clamp(Math.round(bSum / wSum + noise), 0, 255);
+      d[oi + 3] = 255;
+    }
+  }
+
+  smoothMaskRegion(d, mask, 762, 905, 475, 589, poseA, 4);
+  ctx.putImageData(imgData, 0, 0);
+  return c;
+}
+
+function buildCleanLaptopB(ref61Img) {
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(ref61Img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const d = imgData.data;
+
+  for (let y = 235; y <= 558; y++) {
+    for (let x = 504; x <= 1048; x++) {
+      const i = (y * W + x) * 4;
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      if (g > Math.max(r, b) + 4) {
+        d[i + 1] = Math.round(Math.max(r, b) + 2);
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return c;
+}
+
+// Smoothly fill laptop zone in ref61 with 24px soft top/bottom radial blend so zero horizontal seam ever appears
+function buildRefWall(ref61Img) {
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(ref61Img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const orig = new Uint8ClampedArray(imgData.data);
+  const d = imgData.data;
+
+  for (let y = 215; y <= 582; y++) {
+    const il = (y * W + 485) * 4;
+    const ir = (y * W + 1075) * 4;
+    // Soft vertical fade near top (215..245) & bottom (552..582) to follow studio spotlight curve smoothly
+    const edgeV = Math.min(smoothstep(215, 248, y), 1 - smoothstep(552, 582, y));
+    for (let x = 486; x <= 1074; x++) {
+      const i = (y * W + x) * 4;
+      const t = (x - 485) / (1075 - 485);
+      const edgeH = Math.min(smoothstep(485, 515, x), 1 - smoothstep(1045, 1075, x));
+      const w = edgeV * edgeH;
+      const fillR = orig[il] * (1 - t) + orig[ir] * t;
+      const fillG = orig[il + 1] * (1 - t) + orig[ir + 1] * t;
+      const fillB = orig[il + 2] * (1 - t) + orig[ir + 2] * t;
+      d[i] = Math.round(orig[i] * (1 - w) + fillR * w);
+      d[i + 1] = Math.round(orig[i + 1] * (1 - w) + fillG * w);
+      d[i + 2] = Math.round(orig[i + 2] * (1 - w) + fillB * w);
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return c;
+}
+
+function buildPanoramicPlate(plateImg) {
+  const c = document.createElement('canvas');
+  c.width = 2400; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(plateImg, 0, -65, 1280, 850);
+  const strip = ctx.getImageData(1235, 0, 1, H);
+  const out = ctx.createImageData(1125, H);
+  for (let y = 0; y < H; y++) {
+    const si = y * 4;
+    const r = strip.data[si], g = strip.data[si + 1], b = strip.data[si + 2];
+    for (let x = 0; x < 1125; x++) {
+      const oi = (y * 1125 + x) * 4;
+      out.data[oi] = r; out.data[oi + 1] = g; out.data[oi + 2] = b; out.data[oi + 3] = 255;
+    }
+  }
+  ctx.putImageData(out, 1275, 0);
+  return c;
+}
+
+function buildPersonNoLaptopAndFingers(cutImg) {
+  const body = document.createElement('canvas');
+  body.width = W; body.height = H;
+  const bx = body.getContext('2d');
+  bx.drawImage(cutImg, 349.3333, -165.3333, 592.8889, 1052.4444);
+
+  const releaseHand = document.createElement('canvas');
+  releaseHand.width = W; releaseHand.height = H;
+  const fx = releaseHand.getContext('2d');
+  fx.drawImage(cutImg, 349.3333, -165.3333, 592.8889, 1052.4444);
+
+  // Explicit expanded erase polygon strictly enveloping outer 3px silver bevel on all edges (including concave 0->7->6->5!)
+  const poseAErase = [
+    [790, 448], // 0 outer
+    [935, 427], // 1 outer
+    [890, 563], // 2 outer
+    [746, 592], // 3 outer
+    [648, 574], // 4 outer
+    [648, 558], // 5 outer
+    [730, 543], // 6 outer
+    [749, 544], // 7 outer
+  ];
+
+  const bd = bx.getImageData(0, 0, W, H);
+  const fd = fx.getImageData(0, 0, W, H);
+  const bPix = bd.data;
+  const fPix = fd.data;
+
+  // 1) releaseHand keeps ONLY protruding fingers & lower palm (x>=768, y>=520)
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const r = fPix[i], g = fPix[i + 1], b = fPix[i + 2];
+      const warm = (r - b) > 10 || (r - g) > 6;
+      const inFingers = x >= 768 && x <= 905 && y >= 520 && y <= 635 && insidePoly(x, y, poseAErase) && warm;
+      const inPalmUnder = x >= 768 && x <= 900 && y > 560 && y <= 645 && (warm || x > 782);
+      if (!((inFingers || inPalmUnder) && fPix[i + 3] > 60)) {
+        fPix[i + 3] = 0;
+      }
+    }
+  }
+  fx.putImageData(fd, 0, 0);
+
+  // 2) Scan true black jacket sleeve outer edge strictly above laptop (y=360..432)
+  const jacketRightX = new Float32Array(H);
+  for (let y = 360; y <= 432; y++) {
+    let rx = 740;
+    for (let x = 740; x <= 845; x++) {
+      if (bPix[(y * W + x) * 4 + 3] > 180) rx = x;
+    }
+    jacketRightX[y] = rx;
+  }
+  const jTopX = jacketRightX[430];
+  for (let y = 433; y < H; y++) {
+    const t = clamp((y - 432) / 170, 0, 1);
+    const s = t * t * (3 - 2 * t);
+    jacketRightX[y] = jTopX * (1 - s) + 776 * s;
+  }
+
+  // 3) Measure true top & bottom y of poseAErase per column x for seamless vertical bridging
+  const colTop = new Int32Array(W).fill(-1);
+  const colBot = new Int32Array(W).fill(-1);
+  for (let x = 640; x <= 940; x++) {
+    for (let y = 420; y <= 605; y++) {
+      if (insidePoly(x, y, poseAErase)) {
+        if (colTop[x] === -1) colTop[x] = y;
+        colBot[x] = y;
+      }
+    }
+  }
+
+  const refCopy = new Uint8ClampedArray(bPix);
+  for (let x = 642; x <= 940; x++) {
+    const topY = colTop[x];
+    const botY = colBot[x];
+    for (let y = 422; y <= 645; y++) {
+      const inLap = insidePoly(x, y, poseAErase);
+      const jRight = jacketRightX[y];
+      const inProtrudingHand = x > jRight - 3 && y >= 545 && y <= 645;
+      if (!inLap && !inProtrudingHand) continue;
+
+      const oi = (y * W + x) * 4;
+      if (x > jRight) {
+        bPix[oi + 3] = 0;
+        continue;
+      }
+
+      const edgeAlpha = clamp((jRight - x) / 2.8, 0, 1);
+
+      if (x < 750 && topY !== -1 && botY !== -1) {
+        const yAbove = clamp(topY - 4, 375, topY - 1);
+        const yBelow = clamp(botY + 5, botY + 1, 642);
+        const t = clamp((y - topY) / Math.max(1, botY - topY), 0, 1);
+        const sA = (yAbove * W + x) * 4;
+        const sB = (yBelow * W + x) * 4;
+        const bIsWarm = refCopy[sB] - refCopy[sB + 2] > 18 && refCopy[sB] > 105;
+        const wB = bIsWarm ? 0 : t;
+        const wA = 1 - wB;
+        bPix[oi] = Math.round(refCopy[sA] * wA + refCopy[sB] * wB);
+        bPix[oi + 1] = Math.round(refCopy[sA + 1] * wA + refCopy[sB + 1] * wB);
+        bPix[oi + 2] = Math.round(refCopy[sA + 2] * wA + refCopy[sB + 2] * wB);
+        bPix[oi + 3] = Math.round(refCopy[sA + 3] * edgeAlpha);
+      } else {
+        // Proportionally map sleeve width [742..jRight] from clean upper bicep [742..jTopX-2] with ping-pong rows
+        const rel = clamp((x - 742) / Math.max(1, jRight - 742), 0, 1);
+        const cleanX = Math.round(742 + rel * Math.max(1, jTopX - 744));
+        const dy = Math.max(0, y - 432);
+        const ping = dy % 52 < 26 ? dy % 26 : 25 - (dy % 26);
+        const srcY = clamp(430 - ping, 395, 430);
+        const sIdx = (srcY * W + cleanX) * 4;
+        bPix[oi] = refCopy[sIdx];
+        bPix[oi + 1] = refCopy[sIdx + 1];
+        bPix[oi + 2] = refCopy[sIdx + 2];
+        bPix[oi + 3] = Math.round(refCopy[sIdx + 3] * edgeAlpha);
+      }
+    }
+  }
+  bx.putImageData(bd, 0, 0);
+  return { body, releaseHand, bodyPix: bd.data };
+}
+
+function buildBlurredPersonCanvas(srcPix, halfRadius, scratchCanvas) {
+  const r = Math.max(0, Math.round(halfRadius));
+  const ctx = scratchCanvas.getContext('2d');
+  const outImg = ctx.createImageData(W, H);
+  const out = outImg.data;
+  if (r <= 1) {
+    out.set(srcPix);
+    ctx.putImageData(outImg, 0, 0);
+    return scratchCanvas;
+  }
+  const win = r * 2 + 1;
+  for (let y = 0; y < H; y++) {
+    const rowOff = y * W * 4;
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+    for (let x = -r; x <= r; x++) {
+      const sx = clamp(x, 0, W - 1);
+      const si = rowOff + sx * 4;
+      const a = srcPix[si + 3];
+      sumR += srcPix[si] * a;
+      sumG += srcPix[si + 1] * a;
+      sumB += srcPix[si + 2] * a;
+      sumA += a;
+    }
+    for (let x = 0; x < W; x++) {
+      const oi = rowOff + x * 4;
+      if (sumA > 0) {
+        out[oi] = Math.round(sumR / sumA);
+        out[oi + 1] = Math.round(sumG / sumA);
+        out[oi + 2] = Math.round(sumB / sumA);
+        out[oi + 3] = Math.round(sumA / win);
+      }
+      const addX = clamp(x + r + 1, 0, W - 1);
+      const remX = clamp(x - r, 0, W - 1);
+      const ai = rowOff + addX * 4;
+      const ri = rowOff + remX * 4;
+      const aa = srcPix[ai + 3], ra = srcPix[ri + 3];
+      sumR += srcPix[ai] * aa - srcPix[ri] * ra;
+      sumG += srcPix[ai + 1] * aa - srcPix[ri + 1] * ra;
+      sumB += srcPix[ai + 2] * aa - srcPix[ri + 2] * ra;
+      sumA += aa - ra;
+    }
+  }
+  ctx.putImageData(outImg, 0, 0);
+  return scratchCanvas;
+}
+
+(async () => {
+  const statusEl = document.getElementById('status');
+  const plateImg = await loadImg('/public/assets/studio-plate.png');
+  const cutImg = await loadImg('/public/assets/aistudio/Professional_Man_with_Phone_and_Laptop_e5dc5167.png');
+  const ref61Img = await loadImg('/build/ref_061.png');
+
+  const texA = buildCleanLaptopA(cutImg, false);
+  const texA_noLogo = buildCleanLaptopA(cutImg, true);
+  const texB = buildCleanLaptopB(ref61Img);
+  const refWall = buildRefWall(ref61Img);
+  const panoPlate = buildPanoramicPlate(plateImg);
+  const { body: personBody, releaseHand, bodyPix } = buildPersonNoLaptopAndFingers(cutImg);
+
+  const blurScratch = document.createElement('canvas');
+  blurScratch.width = W; blurScratch.height = H;
+
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = W; frameCanvas.height = H;
+  const ctx = frameCanvas.getContext('2d');
+
+  for (let f = 0; f <= 60; f++) {
+    ctx.clearRect(0, 0, W, H);
+
+    if (f <= 14) {
+      const z = 1.0 + 0.008 * smoothstep(6, 14, f);
+      const ox = -720 * (z - 1) * 0.12;
+      const oy = -420 * (z - 1) * 0.12;
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.scale(z, z);
+      ctx.drawImage(panoPlate, 0, 0, W, H, 0, 0, W, H);
+      ctx.drawImage(cutImg, 349.3333, -165.3333, 592.8889, 1052.4444);
+      ctx.restore();
+    } else {
+      const u = (f - 15) / (61 - 15);
+      const panU = clamp(u / 0.78, 0, 1);
+      const panEase = panU * panU * (3 - 2 * panU);
+      const wallBlend = smoothstep(32, 60, f);
+
+      const camScale = 1.008 + 0.24 * panEase;
+      const plateShiftX = -760 * panEase;
+      const plateBlur = 24 * Math.sin(Math.PI * panEase);
+
+      ctx.save();
+      ctx.globalAlpha = 1;
+      ctx.drawImage(panoPlate, -plateShiftX / camScale, 0, W / camScale, H / camScale, 0, 0, W, H);
+      if (plateBlur > 1.5) {
+        ctx.globalAlpha = 0.28;
+        for (let k = -2; k <= 2; k++) {
+          if (k === 0) continue;
+          const sx = Math.max(0, (-plateShiftX + k * plateBlur * 0.4) / camScale);
+          ctx.drawImage(panoPlate, sx, 0, W / camScale, H / camScale, 0, 0, W, H);
+        }
+      }
+      ctx.restore();
+
+      if (wallBlend > 0) {
+        ctx.save();
+        ctx.globalAlpha = wallBlend;
+        ctx.drawImage(refWall, 0, 0);
+        ctx.restore();
+      }
+
+      const exitU = clamp((f - 15) / 40, 0, 1);
+      let bodyDx = 0, bodyDy = 0;
+      if (exitU < 1) {
+        const moveEase = exitU < 0.22 ? exitU * exitU * 2.0 : Math.pow(exitU, 1.85);
+        bodyDx = -1020 * moveEase;
+        bodyDy = 42 * Math.sin(Math.PI * Math.min(1, exitU * 1.15));
+        const blurHalfR = 32 * smoothstep(0.16, 0.72, exitU);
+        const bodyAlpha = 1 - smoothstep(0.82, 1.0, exitU);
+
+        const blurred = buildBlurredPersonCanvas(bodyPix, blurHalfR, blurScratch);
+        ctx.save();
+        ctx.globalAlpha = bodyAlpha;
+        ctx.drawImage(blurred, bodyDx, bodyDy);
+        ctx.restore();
+      }
+
+      const m = 0.78 * (u * u * (3 - 2 * u)) + 0.22 * u;
+      const liftArc = -14 * Math.sin(Math.PI * u);
+      const pts = poseA.map((pa, idx) => {
+        const pb = poseB[idx];
+        return [
+          pa[0] + (pb[0] - pa[0]) * m,
+          pa[1] + (pb[1] - pa[1]) * m + liftArc,
+        ];
+      });
+
+      const logoFade = smoothstep(22, 42, f);
+      const morphB = smoothstep(26, 56, f);
+
+      ctx.save();
+      ctx.beginPath();
+      pts.forEach(([px, py], idx) => idx === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py));
+      ctx.closePath();
+      ctx.clip();
+
+      if (morphB < 0.999) {
+        ctx.globalAlpha = 1;
+        for (const [i0, i1, i2] of TRIS) {
+          drawTexturedTriangle(ctx, texA, poseA[i0], poseA[i1], poseA[i2], pts[i0], pts[i1], pts[i2]);
+        }
+        if (logoFade > 0.01) {
+          ctx.globalAlpha = logoFade;
+          for (const [i0, i1, i2] of TRIS) {
+            drawTexturedTriangle(ctx, texA_noLogo, poseA[i0], poseA[i1], poseA[i2], pts[i0], pts[i1], pts[i2]);
+          }
+        }
+      }
+
+      if (morphB > 0.005) {
+        ctx.globalAlpha = morphB;
+        for (const [i0, i1, i2] of TRIS) {
+          drawTexturedTriangle(ctx, texB, poseB[i0], poseB[i1], poseB[i2], pts[i0], pts[i1], pts[i2]);
+        }
+      }
+      ctx.restore();
+
+      // Swift natural downward hand release (clears cleanly by frame 22!)
+      if (f <= 22) {
+        const rel = clamp((f - 15) / 7, 0, 1);
+        const fDx = bodyDx - 24 * rel;
+        const fDy = bodyDy + 26 * smoothstep(0.1, 1.0, rel);
+        const fAlpha = 1 - smoothstep(0.3, 1.0, rel);
+        if (fAlpha > 0.01) {
+          ctx.save();
+          ctx.globalAlpha = fAlpha;
+          ctx.drawImage(releaseHand, fDx, fDy);
+          ctx.restore();
+        }
+      }
+    }
+
+    const padded = String(f).padStart(3, '0');
+    await postPng(frameCanvas, `f_${padded}.png`);
+    statusEl.textContent = `Rendered ${f}/60`;
+  }
+
+  statusEl.textContent = 'ALL_DONE';
+})();
+</script>
+</body>
+</html>

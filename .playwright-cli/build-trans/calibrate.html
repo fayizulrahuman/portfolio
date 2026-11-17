@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<body>
+<pre id="out">Running...</pre>
+<script>
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+
+async function postPng(canvas, name) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  await fetch('/save/' + name, { method: 'POST', body: blob });
+}
+
+(async () => {
+  const cut = await loadImg('/public/assets/aistudio/Professional_Man_with_Phone_and_Laptop_e5dc5167.png');
+  const ref61 = await loadImg('/build/ref_061.png');
+
+  // Inspect Frame 0 exact pixels by finding jacket/shirt vs silver laptop transition around tip & top edge
+  const c0 = document.createElement('canvas');
+  c0.width = 1280; c0.height = 720;
+  const x0 = c0.getContext('2d');
+  x0.drawImage(cut, 349.3333, -165.3333, 592.8889, 1052.4444);
+
+  // Measure yellow grid spacing vs real pixel coords directly by overlaying PoseA points
+  // Wait: let's measure top edge of lid on c0 where transparent pixels hit lid or jacket/lid edge!
+  const d0 = x0.getImageData(0, 0, 1280, 720).data;
+  const topEdge = [];
+  for (let x = 830; x <= 932; x += 6) {
+    let minY = -1;
+    for (let y = 420; y < 480; y++) {
+      if (d0[(y * 1280 + x) * 4 + 3] > 200) { minY = y; break; }
+    }
+    topEdge.push([x, minY]);
+  }
+
+  // Also scan luminance jump along vertical columns near x=650..760 for bottom edge of silver base!
+  // On black pants/belt under laptop, luminance < 50; on silver base bottom edge, luminance > 130
+  const baseScan = [];
+  for (let x = 648; x <= 765; x += 8) {
+    let topSilverY = -1, botSilverY = -1;
+    for (let y = 540; y < 605; y++) {
+      const i = (y * 1280 + x) * 4;
+      const lum = 0.299 * d0[i] + 0.587 * d0[i+1] + 0.114 * d0[i+2];
+      if (lum > 110 && Math.abs(d0[i] - d0[i+2]) < 22) {
+        if (topSilverY === -1) topSilverY = y;
+        botSilverY = y;
+      }
+    }
+    baseScan.push([x, topSilverY, botSilverY]);
+  }
+
+  // Pose A & Pose B test polygons (clockwise: lidTL, lidTR, lidBR, hingeBot, baseTipBot, baseTipTop, deckPeak, baseHingeTop)
+  // Let's draw a 600x360 zoomed crop of c0 and ref61 with candidate vertices marked!
+  const poseA = [
+    [796, 456], // 0: lidTL
+    [930, 431], // 1: lidTR
+    [885, 558], // 2: lidBR
+    [747, 588], // 3: hingeBot
+    [652, 572], // 4: baseTipBot
+    [652, 560], // 5: baseTipTop
+    [728, 540], // 6: deckPeak
+    [758, 540], // 7: baseHingeTop
+  ];
+
+  const poseB = [
+    [872, 238], // 0: lidTL
+    [1044, 240], // 1: lidTR
+    [947, 518], // 2: lidBR
+    [784, 557], // 3: hingeBot
+    [508, 544], // 4: baseTipBot
+    [508, 534], // 5: baseTipTop
+    [680, 509], // 6: deckPeak
+    [784, 509], // 7: baseHingeTop
+  ];
+
+  function drawOverlay(imgCanvas, poly, cropX, cropY, cropW, cropH, name) {
+    const out = document.createElement('canvas');
+    out.width = cropW * 2; out.height = cropH * 2;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(imgCanvas, cropX, cropY, cropW, cropH, 0, 0, out.width, out.height);
+    ctx.strokeStyle = '#00f3ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    poly.forEach(([px, py], i) => {
+      const cx = (px - cropX) * 2, cy = (py - cropY) * 2;
+      if (i === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    poly.forEach(([px, py], i) => {
+      const cx = (px - cropX) * 2, cy = (py - cropY) * 2;
+      ctx.fillStyle = '#ff2a6d';
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText(String(i), cx + 6, cy - 4);
+    });
+    return postPng(out, name);
+  }
+
+  const c61 = document.createElement('canvas');
+  c61.width = 1280; c61.height = 720;
+  c61.getContext('2d').drawImage(ref61, 0, 0);
+
+  await drawOverlay(c0, poseA, 630, 415, 330, 195, 'cal-a.png');
+  await drawOverlay(c61, poseB, 490, 220, 580, 360, 'cal-b.png');
+
+  document.getElementById('out').textContent = JSON.stringify({ topEdge, baseScan });
+})();
+</script>
+</body>
+</html>

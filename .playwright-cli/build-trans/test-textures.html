@@ -1,0 +1,198 @@
+<!doctype html>
+<html>
+<body>
+<pre id="out">Running...</pre>
+<script>
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+
+async function postPng(canvas, name) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  await fetch('/save/' + name, { method: 'POST', body: blob });
+}
+
+// Point-in-polygon check
+function insidePoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1];
+    const xj = poly[j][0], yj = poly[j][1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-9) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+(async () => {
+  const cut = await loadImg('/public/assets/aistudio/Professional_Man_with_Phone_and_Laptop_e5dc5167.png');
+  const ref61 = await loadImg('/build/ref_061.png');
+
+  // Exact calibrated Pose A & Pose B (clockwise: 0=lidTL, 1=lidTR, 2=lidBR, 3=hingeBot, 4=baseTipBot, 5=baseTipTop, 6=deckPeak, 7=baseHingeTop)
+  const poseA = [
+    [796, 452], // 0: lidTL
+    [930, 431], // 1: lidTR
+    [885, 558], // 2: lidBR
+    [747, 586], // 3: hingeBot
+    [653, 569], // 4: baseTipBot
+    [653, 560], // 5: baseTipTop
+    [734, 546], // 6: deckPeak
+    [758, 546], // 7: baseHingeTop
+  ];
+
+  const poseB = [
+    [875, 237], // 0: lidTL
+    [1044, 239], // 1: lidTR
+    [946, 517], // 2: lidBR
+    [783, 555], // 3: hingeBot
+    [507, 545], // 4: baseTipBot
+    [507, 537], // 5: baseTipTop
+    [654, 515], // 6: deckPeak
+    [782, 513], // 7: baseHingeTop
+  ];
+
+  // Build texA on 1280x720 canvas with clean finger aluminum reconstruction + optional logo-free lid
+  const cA = document.createElement('canvas');
+  cA.width = 1280; cA.height = 720;
+  const xA = cA.getContext('2d');
+  xA.drawImage(cut, 349.3333, -165.3333, 592.8889, 1052.4444);
+  const imgA = xA.getImageData(0, 0, 1280, 720);
+  const dA = imgA.data;
+
+  // Detect finger mask inside lower lid: skin tone OR dark shadow crevice next to skin inside x:[765..900], y:[524..588]
+  // Note: Apple logo is around x:[822..866], y:[480..526] -> strictly above y=526!
+  const lidYMin = 430, lidYMax = 588, lidXMin = 745, lidXMax = 935;
+  const isSkin = new Uint8Array(1280 * 720);
+  for (let y = 524; y <= 588; y++) {
+    for (let x = 768; x <= 900; x++) {
+      if (!insidePoly(x, y, poseA)) continue;
+      const i = (y * 1280 + x) * 4;
+      const r = dA[i], g = dA[i+1], b = dA[i+2];
+      // Fingers are warm peachy/reddish (r - b > 10 or r - g > 6) OR very dark shadow crease under fingers (r < 88 && g < 88)
+      const warm = (r - b) > 10 || (r - g) > 6;
+      const crease = (r < 92 && g < 92 && b < 95 && y > 540);
+      if (warm || crease) {
+        isSkin[y * 1280 + x] = 1;
+      }
+    }
+  }
+  // Dilate finger mask by 3px to catch all warm/dark anti-aliased fringes around fingernails and knuckles
+  const isSkinDil = new Uint8Array(1280 * 720);
+  for (let y = 522; y <= 589; y++) {
+    for (let x = 765; x <= 902; x++) {
+      let hit = 0;
+      for (let dy = -3; dy <= 3 && !hit; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          const yy = y + dy, xx = x + dx;
+          if (yy >= 0 && yy < 720 && xx >= 0 && xx < 1280 && isSkin[yy * 1280 + xx]) {
+            hit = 1; break;
+          }
+        }
+      }
+      isSkinDil[y * 1280 + x] = hit;
+    }
+  }
+
+  // Also capture clean lid reference brightness gradient from rows y=460..522 (avoiding Apple logo x=818..865, y=482..525)
+  // For each pixel in isSkinDil:
+  // Reconstruct aluminum seamlessly using weighted blend of:
+  //   1) Nearest clean lid pixel vertically above at same slant offset (x + (yClean - y)*0.34, yClean) adjusted by subtle vertical shade -0.18 per px downward
+  //   2) Left & right horizontal interpolation across clean lid pixels in same row (when both left and right exist)
+  const cleanCopy = new Uint8ClampedArray(dA);
+  for (let y = 522; y <= 589; y++) {
+    for (let x = 765; x <= 902; x++) {
+      if (!isSkinDil[y * 1280 + x] || !insidePoly(x, y, poseA)) continue;
+
+      // Sample left & right clean pixels in same row
+      let lx = x - 1;
+      while (lx >= 752 && (isSkinDil[y * 1280 + lx] || !insidePoly(lx, y, poseA))) lx--;
+      let rx = x + 1;
+      while (rx <= 920 && (isSkinDil[y * 1280 + rx] || !insidePoly(rx, y, poseA))) rx++;
+      const hasL = lx >= 752 && insidePoly(lx, y, poseA) && !isSkinDil[y * 1280 + lx];
+      const hasR = rx <= 920 && insidePoly(rx, y, poseA) && !isSkinDil[y * 1280 + rx];
+
+      // Sample clean pixel diagonally up along lid angle (~ +0.30 px right per px up)
+      let uy = y - 1, ux = x;
+      while (uy >= 455) {
+        const sx = Math.round(x + (y - uy) * -0.15); // lid sheen slopes slightly down-right
+        if (insidePoly(sx, uy, poseA) && !isSkinDil[uy * 1280 + sx] && !(sx >= 816 && sx <= 866 && uy >= 478 && uy <= 526)) {
+          ux = sx; break;
+        }
+        uy--;
+      }
+
+      let rSum = 0, gSum = 0, bSum = 0, wSum = 0;
+      if (hasL && hasR) {
+        const t = (x - lx) / (rx - lx);
+        const il = (y * 1280 + lx) * 4, ir = (y * 1280 + rx) * 4;
+        const hr = cleanCopy[il] * (1 - t) + cleanCopy[ir] * t;
+        const hg = cleanCopy[il+1] * (1 - t) + cleanCopy[ir+1] * t;
+        const hb = cleanCopy[il+2] * (1 - t) + cleanCopy[ir+2] * t;
+        rSum += hr * 1.4; gSum += hg * 1.4; bSum += hb * 1.4; wSum += 1.4;
+      } else if (hasL) {
+        const il = (y * 1280 + lx) * 4;
+        rSum += cleanCopy[il] * 0.7; gSum += cleanCopy[il+1] * 0.7; bSum += cleanCopy[il+2] * 0.7; wSum += 0.7;
+      } else if (hasR) {
+        const ir = (y * 1280 + rx) * 4;
+        rSum += cleanCopy[ir] * 0.7; gSum += cleanCopy[ir+1] * 0.7; bSum += cleanCopy[ir+2] * 0.7; wSum += 0.7;
+      }
+
+      if (uy >= 455) {
+        const iu = (uy * 1280 + ux) * 4;
+        const shade = Math.max(-14, -(y - uy) * 0.16);
+        rSum += (cleanCopy[iu] + shade) * 1.1;
+        gSum += (cleanCopy[iu+1] + shade) * 1.1;
+        bSum += (cleanCopy[iu+2] + shade) * 1.1;
+        wSum += 1.1;
+      }
+
+      // Deterministic subtle aluminum grain
+      const noise = (((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1) - 0.5) * 3.0;
+      const outIdx = (y * 1280 + x) * 4;
+      dA[outIdx] = Math.max(0, Math.min(255, Math.round(rSum / wSum + noise)));
+      dA[outIdx+1] = Math.max(0, Math.min(255, Math.round(gSum / wSum + noise)));
+      dA[outIdx+2] = Math.max(0, Math.min(255, Math.round(bSum / wSum + noise)));
+      dA[outIdx+3] = 255;
+    }
+  }
+
+  // Soft 1.2px feathered alpha strictly outside poseA (and clip texA cleanly!)
+  xA.putImageData(imgA, 0, 0);
+
+  // Create cropped preview of clean texA & PoseB-clipped texB (600x400) to verify zero green/white/skin artifacts
+  const prev = document.createElement('canvas');
+  prev.width = 1280; prev.height = 460;
+  const xp = prev.getContext('2d');
+  xp.fillStyle = '#18543d';
+  xp.fillRect(0, 0, 1280, 460);
+
+  // Clipped texA at left
+  xp.save();
+  xp.beginPath();
+  poseA.forEach(([px, py], i) => i === 0 ? xp.moveTo(px - 580, py - 380) : xp.lineTo(px - 580, py - 380));
+  xp.closePath();
+  xp.clip();
+  xp.drawImage(cA, 580, 380, 400, 260, 0, 0, 400, 260);
+  xp.restore();
+
+  // Clipped texB at right
+  xp.save();
+  xp.beginPath();
+  poseB.forEach(([px, py], i) => i === 0 ? xp.moveTo(px - 50, py - 180) : xp.lineTo(px - 50, py - 180));
+  xp.closePath();
+  xp.clip();
+  xp.drawImage(ref61, 50, 180, 1080, 420, 0, 0, 1080, 420);
+  xp.restore();
+
+  await postPng(prev, 'test-textures.png');
+  document.getElementById('out').textContent = 'DONE';
+})();
+</script>
+</body>
+</html>
