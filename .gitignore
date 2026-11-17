@@ -5,6 +5,8 @@ coverage/
 .DS_Store
 *.log
 .env*
-.env.example
+!.env.example
 .aistudio/
+public/assets/aistudio/
 .vscode/
+.playwright-cli/
